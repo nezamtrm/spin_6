@@ -1,0 +1,25 @@
+# --- وزن‌های مدل - هرگز در گیت commit نشوند (جزئیات کامل در MODEL_WEIGHTS.md) ---
+ParsBert/models/
+app/pipeline/triage_model.bin
+app/pipeline/triage_model.ftz
+
+# --- دیتاست‌های تولیدشده (با اسکریپت از نو قابل ساخت‌اند، نیازی به گیت نیست) ---
+ParsBert/data/train.csv
+ParsBert/data/validation.csv
+ParsBert/data/test.csv
+eval/*.jsonl
+eval/_train.txt
+eval/_val.txt
+
+# --- محیط/اسرار ---
+.env
+*.env.local
+
+# --- پایتون عمومی ---
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- داده‌ی Qdrant/Prometheus/Grafana وقتی لوکال اجرا می‌شود ---
+docker/prometheus_data/
+docker/grafana_data/

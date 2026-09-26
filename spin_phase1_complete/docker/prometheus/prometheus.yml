@@ -1,0 +1,12 @@
+# docker/prometheus/prometheus.yml
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: spin-api
+    metrics_path: /metrics
+    static_configs:
+      # از داخل شبکه داکر، نام سرویس FastAPI را اینجا بگذارید
+      # (مثلا اگر سرویس در compose نامش "api" است: api:8080)
+      - targets: ["host.docker.internal:8080"]

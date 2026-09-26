@@ -1,0 +1,15 @@
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
+pydantic-settings
+prometheus_client
+aiohttp
+fasttext-wheel
+openai
+pytest
+numpy<2
+hazm
+qdrant-client>=1.9.0
+# لازم برای app/pipeline/router.py (ParsBert/predict.py) و app/rag/embedder.py
+torch>=2.2
+transformers>=4.40
