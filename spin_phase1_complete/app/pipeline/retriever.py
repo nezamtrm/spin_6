@@ -26,12 +26,22 @@ def _kb_collection(specialty_key: str) -> str:
     return f"{settings.QDRANT_COLLECTION_PREFIX}_{specialty_key}"
 
 
-def retrieve(specialty_key: str, query: str, top_k: int | None = None) -> list[dict[str, Any]]:
+def retrieve(
+    specialty_key: str,
+    query: str,
+    top_k: int | None = None,
+    vector_weight: float | None = None,
+    lexical_weight: float | None = None,
+) -> list[dict[str, Any]]:
     """
     خروجی: لیستی از dict سازگار با اسکیمای Source:
         {"title": str, "url": str|None, "author": str|None,
          "published_date": str|None, "relevance": float}
     اگر چیزی پیدا نشد (یا هر جزئی از RAG در دسترس نبود)، [] برمی‌گردد.
+
+    vector_weight/lexical_weight: پاس مستقیم به reranker.rerank - فقط
+    evaluate_retrieval.py برای sweep کردن روی gold set صریح مقدار می‌دهد؛
+    در مسیر عادی چت همیشه None (یعنی مقدار settings) است.
     """
     k = top_k or settings.RAG_TOP_K
     try:
@@ -45,7 +55,7 @@ def retrieve(specialty_key: str, query: str, top_k: int | None = None) -> list[d
     if not candidates:
         return []
 
-    top = rerank(query, candidates, top_k=k)
+    top = rerank(query, candidates, top_k=k, vector_weight=vector_weight, lexical_weight=lexical_weight)
 
     sources: list[dict[str, Any]] = []
     for item in top:
