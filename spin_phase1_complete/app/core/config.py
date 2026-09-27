@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL_NAME: str | None = None
     # چند منبع نهایی (بعد از rerank) به prompt/citation داده شود
     RAG_TOP_K: int = 5
+    RERANK_VECTOR_WEIGHT: float = 0.75
+    RERANK_LEXICAL_WEIGHT: float = 0.25
 
     # ==========================================
     # کش معنایی (app/pipeline/cache.py) - روی همان Qdrant، کالکشن جدا
