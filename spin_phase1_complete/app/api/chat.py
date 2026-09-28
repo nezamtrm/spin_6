@@ -1,4 +1,5 @@
 # app/api/chat.py
+import asyncio
 import time
 from datetime import datetime
 from typing import Optional
@@ -107,7 +108,13 @@ async def _real_ai_stream(request: Request, chat_request: ChatRequest):
         specialty_fa = None
         confidence = 1.0
     else:
-        router_result = resolve_specialty(chat_request.query)
+        # asyncio.to_thread: resolve_specialty یک forward-pass واقعی
+        # ParsBERT است (CPU/GPU-bound، synchronous). بدون این، تا این
+        # محاسبه تمام نشود، event loop تک‌رشته‌ای uvicorn هیچ درخواست
+        # دیگری (حتی یک /health ساده) را جواب نمی‌دهد - یعنی درخواست‌های
+        # هم‌زمان به‌جای موازی، صف می‌شوند. جزئیات کامل در README.md
+        # (بخش ظرفیت هم‌زمان).
+        router_result = await asyncio.to_thread(resolve_specialty, chat_request.query)
         specialty = router_result.key
         specialty_fa = router_result.specialty_fa
         confidence = router_result.confidence
@@ -142,7 +149,10 @@ async def _real_ai_stream(request: Request, chat_request: ChatRequest):
     # مرحله ۲: تریاژ اورژانس (زیر ۵۰ میلی‌ثانیه، فقط CPU)
     # ==========================================
     triage_start = time.perf_counter()
-    emergency_detected = is_emergency(safe_query)
+    # همان دلیل asyncio.to_thread بالا - is_emergency (رگکس+hazm+fastText)
+    # هم synchronous است. اینجا خصوصا حساس‌تر است چون این دقیقاً همان
+    # الزام <100ms مستند در OpenApi_Spin.yaml است.
+    emergency_detected = await asyncio.to_thread(is_emergency, safe_query)
     triage_duration_ms.observe((time.perf_counter() - triage_start) * 1000)
 
     if emergency_detected:
@@ -161,7 +171,7 @@ async def _real_ai_stream(request: Request, chat_request: ChatRequest):
     # ==========================================
     # عمدا *بعد* از تریاژ است: حتی اگر متن با یک سوال قبلی عینا یکسان باشد،
     # تریاژ اورژانس هرگز از کش رد نمی‌شود - ایمنی روی سرعت اولویت دارد.
-    cache_result = response_cache.get_cached(specialty, safe_query)
+    cache_result = await asyncio.to_thread(response_cache.get_cached, specialty, safe_query)
     if cache_result.hit:
         cache_hits_total.inc()
         yield format_sse_event("cached", {"request_id": req_id, "similarity": cache_result.similarity})
@@ -201,7 +211,8 @@ async def _real_ai_stream(request: Request, chat_request: ChatRequest):
     # ==========================================
     # مرحله ۵.۵ و ۶ و ۶.۵: RAG + پرونده ابتدایی + ساخت پرامپت
     # ==========================================
-    messages, sources, patient_record = inference.prepare(
+    messages, sources, patient_record = await asyncio.to_thread(
+        inference.prepare,
         specialty=specialty,
         specialty_fa=specialty_fa or specialty,
         history=history_dicts,
@@ -269,7 +280,11 @@ async def _real_ai_stream(request: Request, chat_request: ChatRequest):
         **structured_payload,
         "structured": {k: v for k, v in structured_payload.get("structured", {}).items() if k != "patient_record"},
     }
-    response_cache.set_cached(
+    # asyncio.to_thread: همان دلیل بالا (embedding + upsert به Qdrant هر دو
+    # blocking‌اند). این‌جا حیاتی نیست (فقط دم همین درخواست است) ولی برای
+    # یکدستی و رها نکردن event loop حتی یک لحظه، رعایت شده.
+    await asyncio.to_thread(
+        response_cache.set_cached,
         specialty_key=specialty,
         query=safe_query,
         answer="".join(collected_tokens),
