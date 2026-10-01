@@ -66,7 +66,7 @@ def load_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def evaluate(model, rows: list[dict], name: str) -> None:
+def evaluate(model, rows: list[dict], name: str) -> dict:
     tp = fp = tn = fn = 0
     false_negatives = []
     for r in rows:
@@ -97,16 +97,37 @@ def evaluate(model, rows: list[dict], name: str) -> None:
         print("  موارد بحرانیِ گم‌شده (باید دستی بازبینی شوند):")
         for t in false_negatives:
             print(f"    - {t}")
+    return {
+        "accuracy": acc,
+        "critical_recall": recall,
+        "critical_precision": precision,
+        "fn": fn,
+        "fp": fp,
+        "n": total,
+    }
 
 
 def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--log", action="store_true", help="ثبت در eval_history.jsonl")
+    args = ap.parse_args()
+
     model = fasttext.load_model(MODEL_PATH)
+    from log_eval_result import log_result
     for name, filename in [("test.jsonl", "test.jsonl"), ("golden_emergency.jsonl", "golden_emergency.jsonl")]:
         path = _ROOT / "eval" / filename
         if not path.exists():
             print(f"رد شد: {path} پیدا نشد")
             continue
-        evaluate(model, load_jsonl(path), name)
+        metrics = evaluate(model, load_jsonl(path), name)
+        if args.log:
+            log_result(
+                "triage",
+                f"eval/{filename}",
+                {k: (round(v, 4) if isinstance(v, float) else v) for k, v in metrics.items() if not (isinstance(v, float) and v != v)},
+                notes="evaluate_triage.py (fastText only)",
+            )
 
 
 if __name__ == "__main__":
