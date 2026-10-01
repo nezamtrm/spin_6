@@ -1,7 +1,7 @@
 openapi: 3.0.0
 info:
   title: Spin API
-  version: 1.0.0
+  version: 1.1.0
   description:     سرویس داخلی مشاوره پزشکی فارسی Q&A با مسیریابی per-body-part.
 servers:
   - url: http://ai-service.internal:8080/v1
@@ -26,10 +26,17 @@ paths:
       operationId: medicalChat
       description: |
         اندپوینت اصلی. خروجی SSE با فرمت `data: <JSON>\n\n` + `id:` + `retry: 3000`.
-        ترتیب: `start` -> (`emergency` -> `done` | `safety_block` -> `done` | [`cached`] -> `token`* -> `citation` -> `structured` -> `done`)
+        ترتیب (اصلاح‌شده نسخه ۱.۱ - گارد و تریاژ قبل از روتر، برای latency
+        بهتر روی دقیقا همان مسیری که به سرعت حساس‌ترین است، بدون افت دقت
+        در هیچ مرحله‌ای): `safety_block -> done` | `emergency -> done` |
+        (`start` -> [`cached`] -> `token`* -> `citation` -> `structured` -> `done`)
+        یعنی `start` دیگر رویداد مطلقا اول نیست؛ فقط در مسیر عادی (نه
+        emergency/safety_block) و بعد از تشخیص تخصص توسط روتر می‌آید - چون
+        specialty/confidence که در آن الزامی‌اند، فقط آن‌جا معنا دارند.
         هر 15s یک `heartbeat` برای زنده نگه داشتن کانکشن ارسال می شود.
         Backend مسئول: session, hash user_id با SHA256, rate-limit.
-        این سرویس مسئول: triage اورژانس زیر 100ms، کش، روتر، RAG، inference، گارد.
+        این سرویس مسئول (به همین ترتیب اجرا): گارد ورودی، triage اورژانس
+        زیر 100ms، روتر تخصص، کش، RAG، inference، گارد خروجی.
       requestBody:
         required: true
         content:
@@ -256,7 +263,9 @@ components:
         completion_tokens: {type: integer}
         latency_ms: {type: integer}
         cached: {type: boolean, default: false}
-        specialty: {type: string}
+        specialty:
+          type: string
+          description: فقط در مسیر عادی هست؛ در safety_block/emergency اصلا فرستاده نمی‌شود چون روتر اجرا نشده
     StructuredMedicalResponse:
       type: object
       required: [summary, recommendations, urgency, disclaimer]
