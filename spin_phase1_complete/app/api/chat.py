@@ -71,23 +71,30 @@ class ChatRequest(BaseModel):
         return value
 
 
-def _done_event(req_id: str, start_time: float, *, specialty: str,
+def _done_event(req_id: str, start_time: float, *, specialty: str | None,
                  total_tokens: int = 0, prompt_tokens: int = 0,
                  completion_tokens: int = 0, cached: bool = False) -> str:
     """
     رویداد done مشترک بین همهٔ مسیرها (عادی/اورژانس/safety_block/cached).
     طبق قرارداد، هر مسیر باید دقیقا با یک done تمام شود؛ استخراج این تابع
     جلوی این را می‌گیرد که یک مسیر جدید در آینده اضافه شود و done را فراموش کند.
+
+    specialty=None برای مسیرهای safety_block/emergency که دیگر (بعد از
+    اصلاح ترتیب پایپلاین) قبل از روتر کوتاه می‌شوند - یعنی اصلا تخصصی
+    تشخیص داده نشده. طبق schema قرارداد، specialty در EventDone الزامی
+    نیست، پس به‌جای فرستادن "specialty": null، فیلد کلا حذف می‌شود.
     """
-    return format_sse_event("done", {
+    payload = {
         "request_id": req_id,
         "total_tokens": total_tokens,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "latency_ms": int((time.perf_counter() - start_time) * 1000),
         "cached": cached,
-        "specialty": specialty,
-    })
+    }
+    if specialty is not None:
+        payload["specialty"] = specialty
+    return format_sse_event("done", payload)
 
 
 async def _real_ai_stream(request: Request, chat_request: ChatRequest):
@@ -95,39 +102,12 @@ async def _real_ai_stream(request: Request, chat_request: ChatRequest):
     start_time = time.perf_counter()
 
     # ==========================================
-    # مرحله ۴: تشخیص تخصص (روتر / ParsBERT)
+    # مرحله ۱: گارد ورودی (بررسی طول و PII) - روی متن خام، قبل از هرچیز
     # ==========================================
-    # باید *قبل* از رویداد start انجام شود چون specialty/confidence جزو
-    # فیلدهای الزامی EventStart است. اگر کاربر خودش تخصص را انتخاب کرده
-    # باشد (selected_body_part)، همان با اطمینان کامل (۱.۰) پذیرفته می‌شود
-    # و دیگر مدل صدا زده نمی‌شود - انتخاب صریح کاربر باید بر حدس مدل اولویت
-    # داشته باشد. متن خام (نه sanitized) به روتر داده می‌شود چون
-    # گارد ورودی هنوز اجرا نشده - محتوای محرمانه روی تشخیص تخصص اثری ندارد.
-    if chat_request.selected_body_part:
-        specialty = chat_request.selected_body_part
-        specialty_fa = None
-        confidence = 1.0
-    else:
-        # asyncio.to_thread: resolve_specialty یک forward-pass واقعی
-        # ParsBERT است (CPU/GPU-bound، synchronous). بدون این، تا این
-        # محاسبه تمام نشود، event loop تک‌رشته‌ای uvicorn هیچ درخواست
-        # دیگری (حتی یک /health ساده) را جواب نمی‌دهد - یعنی درخواست‌های
-        # هم‌زمان به‌جای موازی، صف می‌شوند. جزئیات کامل در README.md
-        # (بخش ظرفیت هم‌زمان).
-        router_result = await asyncio.to_thread(resolve_specialty, chat_request.query)
-        specialty = router_result.key
-        specialty_fa = router_result.specialty_fa
-        confidence = router_result.confidence
-
-    yield format_sse_event("start", {
-        "request_id": req_id,
-        "specialty": specialty,
-        "confidence": confidence,
-    })
-
-    # ==========================================
-    # مرحله ۱: گارد ورودی (بررسی طول و PII)
-    # ==========================================
+    # عمدا اولین مرحله: ارزان‌ترین چک (regex، میکروثانیه) است؛ اگر طول
+    # نامعتبر بود یا... هیچ دلیلی ندارد قبلش محاسبه‌ی گران‌تری (تریاژ/روتر)
+    # انجام شود. طبق قرارداد اصلاح‌شده، safety_block دیگر منتظر "start"
+    # نمی‌ماند - مستقیم اولین رویداد است.
     guard_res = check_input(chat_request.query)
     if not guard_res.is_safe:
         safety_blocks_total.labels(reason=guard_res.reason or "unknown").inc()
@@ -136,7 +116,7 @@ async def _real_ai_stream(request: Request, chat_request: ChatRequest):
             "reason": guard_res.reason,
             "message": guard_res.message,
         })
-        yield _done_event(req_id, start_time, specialty=specialty)
+        yield _done_event(req_id, start_time, specialty=None)
         return
 
     safe_query = guard_res.sanitized_text
@@ -146,12 +126,15 @@ async def _real_ai_stream(request: Request, chat_request: ChatRequest):
     history_dicts = [msg.model_dump(exclude_none=True) for msg in (chat_request.conversation_history or [])]
 
     # ==========================================
-    # مرحله ۲: تریاژ اورژانس (زیر ۵۰ میلی‌ثانیه، فقط CPU)
+    # مرحله ۲: تریاژ اورژانس (زیر ۵۰ میلی‌ثانیه، فقط CPU) - قبل از روتر
     # ==========================================
+    # عمدا *قبل* از روتر: تریاژ خیلی ارزان‌تر از یک forward-pass کامل
+    # ParsBERT است. اگر پیام اورژانسی باشد، اصلا نیازی به دانستن تخصص
+    # نیست (کاربر فقط باید ۱۱۵ را بگیرد) - پس چرا محاسبه‌اش کنیم؟ این
+    # ترتیب روی دقیق‌ترین مسیر latency (<100ms مستند در قرارداد) مستقیم
+    # اثر مثبت دارد، بدون هیچ هزینه‌ی دقت جایی (تریاژ به specialty وابسته
+    # نیست، و specialty هم به اینکه تریاژ قبلش اجرا شده یا نه وابسته نیست).
     triage_start = time.perf_counter()
-    # همان دلیل asyncio.to_thread بالا - is_emergency (رگکس+hazm+fastText)
-    # هم synchronous است. اینجا خصوصا حساس‌تر است چون این دقیقاً همان
-    # الزام <100ms مستند در OpenApi_Spin.yaml است.
     emergency_detected = await asyncio.to_thread(is_emergency, safe_query)
     triage_duration_ms.observe((time.perf_counter() - triage_start) * 1000)
 
@@ -163,8 +146,33 @@ async def _real_ai_stream(request: Request, chat_request: ChatRequest):
             "message": "علائم شما نیازمند بررسی فوری است. فورا با ۱۱۵ تماس بگیرید.",
             "action": "call_115",
         })
-        yield _done_event(req_id, start_time, specialty=specialty)
+        yield _done_event(req_id, start_time, specialty=None)
         return
+
+    # ==========================================
+    # مرحله ۴: تشخیص تخصص (روتر / ParsBERT) - فقط روی مسیر عادی
+    # ==========================================
+    # از این‌جا به بعد مطمئنیم درخواست نه بلاک‌شدنی بود نه اورژانسی - پس
+    # تنها حالا این محاسبه‌ی گران‌تر توجیه دارد. متن sanitized (نه خام)
+    # به روتر داده می‌شود - چون گارد ورودی حالا از قبل اجرا شده.
+    if chat_request.selected_body_part:
+        specialty = chat_request.selected_body_part
+        specialty_fa = None
+        confidence = 1.0
+    else:
+        router_result = await asyncio.to_thread(resolve_specialty, safe_query)
+        specialty = router_result.key
+        specialty_fa = router_result.specialty_fa
+        confidence = router_result.confidence
+
+    # رویداد start حالا اینجاست: همان لحظه‌ای که specialty واقعا مشخص شده،
+    # نه قبل‌ترش. طبق قرارداد اصلاح‌شده، start دیگر "همیشه اولین رویداد
+    # مطلق" نیست؛ فقط برای مسیر عادی (نه emergency/safety_block) معنا دارد.
+    yield format_sse_event("start", {
+        "request_id": req_id,
+        "specialty": specialty,
+        "confidence": confidence,
+    })
 
     # ==========================================
     # مرحله ۵: کش سوالات تکراری (بعد از رد شدن از تریاژ)
