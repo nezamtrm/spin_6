@@ -50,7 +50,7 @@ def load_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def evaluate(rows: list[dict], name: str, predict_fn) -> None:
+def evaluate(rows: list[dict], name: str, predict_fn) -> dict:
     tp = fp = tn = fn = 0
     wrong_details = []
     for r in rows:
@@ -77,15 +77,27 @@ def evaluate(rows: list[dict], name: str, predict_fn) -> None:
     print(f"  FN={fn}  FP={fp}")
     for kind, text in wrong_details:
         print(f"    [{kind}] {text}")
+    return {
+        "accuracy": acc,
+        "critical_recall": recall,
+        "critical_precision": precision,
+        "fn": fn,
+        "fp": fp,
+        "n": total,
+    }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rule-only", action="store_true",
                      help="فقط rule_based_check (بدون fastText) - برای دیدن اثر خالص کلیدواژه/نگیشن")
+    ap.add_argument("--log", action="store_true", help="ثبت در eval_history.jsonl")
     args = ap.parse_args()
 
     predict_fn = triage.rule_based_check if args.rule_only else triage.is_emergency
+    task = "triage-rule-only" if args.rule_only else "triage"
+
+    from log_eval_result import log_result
 
     files = [("hard_negatives.jsonl", "hard_negatives (نگیشن/زمان گذشته)"),
              ("test.jsonl", "test.jsonl (پایپلاین کامل)"),
@@ -95,7 +107,15 @@ def main() -> None:
         if not path.exists():
             print(f"رد شد: eval/{filename} پیدا نشد")
             continue
-        evaluate(load_jsonl(path), label, predict_fn)
+        metrics = evaluate(load_jsonl(path), label, predict_fn)
+        if args.log:
+            notes = "evaluate_triage_pipeline.py --rule-only" if args.rule_only else "evaluate_triage_pipeline.py"
+            log_result(
+                task,
+                f"eval/{filename}",
+                {k: (round(v, 4) if isinstance(v, float) else v) for k, v in metrics.items() if not (isinstance(v, float) and v != v)},
+                notes=notes,
+            )
 
 
 if __name__ == "__main__":

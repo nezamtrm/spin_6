@@ -23,7 +23,8 @@ prepare_triage_data.py
 
 اجرا:
     python ParsBert/prepare_data.py      # اگر قبلا نزده‌اید (منبع non_critical)
-    python prepare_triage_data.py
+    python prepare_triage_data.py        # train/val با قالب محاوره + غلط‌املایی
+    python build_triage_eval.py          # test / golden / hard_negatives (خارج از train)
     python train_fasttext.py
 """
 import csv
@@ -44,6 +45,8 @@ def _load_triage_module():
 
 triage = _load_triage_module()
 
+# قالب‌های آموزش: جملات محاوره‌ای با ترتیب کلمهٔ متفاوت (نه فقط «کلیدواژه در انتها»).
+# غلط‌املایی/لهجه جداگانه با perturb() اعمال می‌شود تا fastText روی n-gram کار کند.
 CRITICAL_TEMPLATES = [
     "{kw}",
     "کمک کنید {kw}",
@@ -56,6 +59,15 @@ CRITICAL_TEMPLATES = [
     "مادرم {kw}",
     "همین الان {kw} چیکار کنم",
     "{kw}، بگید چیکار کنم",
+    "خواهش میکنم زود بگید {kw}",
+    "{kw} کمک فوری میخوام",
+    "همسرم {kw} چیکار کنم",
+    "آقای دکتر فوریه {kw}",
+    "والا {kw} داغون شدم",
+    "بابا دیگه {kw} بگید چی کار کنم",
+    "از دیشب تا الان {kw}",
+    "{kw} تو راه اومدم اورژانس",
+    "لطفا بگید {kw} خطرناکه؟ فوریه",
 ]
 
 NEGATION_TEMPLATES = [
@@ -63,7 +75,41 @@ NEGATION_TEMPLATES = [
     "{kw} نداره",
     "خدا رو شکر {kw} نشد",
     "نه، {kw} نیست",
+    "نگران {kw} بودم ولی نشد",
+    "{kw} که نداره، فقط سرما خورده",
 ]
+
+def perturb_keyword(kw: str, variant: int) -> str:
+    """چند ریخت واقعی تایپ بیمار: فاصله اضافه، حروف نزدیک، لهجه محاوره."""
+    if variant == 0:
+        return kw
+    replacements = [
+        ("نمی", "نمي"),
+        ("می‌", "مي"),
+        ("ک", "ك"),
+        ("ی", "ي"),
+        ("تشنج", "تشنچ"),
+        ("بیهوش", "بیحوش"),
+        ("خونریزی", "خونریضی"),
+        ("قفسه", "قفصه"),
+        ("نفس", "نفص"),
+        ("نمیکشه", "نمیكشه"),
+        ("نمیتونم", "نمیتونم"),
+        ("گلوش", "گلوش"),
+        ("سینه", "سینه"),
+    ]
+    out = kw
+    # هر variant یک یا دو جایگزینی اعمال می‌کند تا تنوع باشد نه درهم‌ریختگی کامل
+    applied = 0
+    for src, dst in replacements:
+        if src in out and src != dst:
+            out = out.replace(src, dst, 1)
+            applied += 1
+            if applied >= variant:
+                break
+    if applied == 0:
+        out = kw.replace(" ", "") if " " in kw else (kw + " ")
+    return out.strip() or kw
 
 
 def gen_critical() -> list[str]:
@@ -71,6 +117,8 @@ def gen_critical() -> list[str]:
     for kw in sorted(triage.EMERGENCY_KEYWORDS):
         for tpl in CRITICAL_TEMPLATES:
             rows.append(tpl.format(kw=kw))
+            for v in (1, 2):
+                rows.append(tpl.format(kw=perturb_keyword(kw, v)))
     return rows
 
 
@@ -79,6 +127,7 @@ def gen_negated_non_critical() -> list[str]:
     for kw in sorted(triage.EMERGENCY_KEYWORDS):
         for tpl in NEGATION_TEMPLATES:
             rows.append(tpl.format(kw=kw))
+            rows.append(tpl.format(kw=perturb_keyword(kw, 1)))
     return rows
 
 
