@@ -47,10 +47,10 @@ def _patch_fasttext_numpy2() -> None:
 
 _patch_fasttext_numpy2()
 
-TRAIN_SOURCE = "eval/train.jsonl"
-VAL_SOURCE = "eval/val.jsonl"
-TRAIN_FILE = "eval/_train.txt"
-VAL_FILE = "eval/_val.txt"
+TRAIN_SOURCE = "train.jsonl"
+VAL_SOURCE = "val.jsonl"
+TRAIN_FILE = "_train.txt"
+VAL_FILE = "_val.txt"
 MODEL_OUT = "app/pipeline/triage_model.bin"
 
 
