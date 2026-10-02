@@ -1,153 +1,151 @@
+# -*- coding: utf-8 -*-
 """
-app/pipeline/hazm_negation.py
+app/pipeline/hazm_negation.py   (نسخهٔ اصلاح‌شده)
 
-Clause-aware negation detection using hazm's POS tagger.
+تشخیص «نگیشن» برای یک کلیدواژهٔ اورژانسی که قبلاً در متن پیدا شده است.
 
-Why "clause-aware" and not "whole sentence"? Consider:
-    "درد نداره ولی نفس نمی‌تونم بکشم"
-The word "نداره" (negated) is real, but it negates "درد" (pain), not the
-actual emergency ("نفس نمی‌تونم بکشم") a few words later. If we checked
-the WHOLE sentence for any negated verb, this dangerous sentence would
-be wrongly suppressed. So instead, we split the sentence into clauses on
-connectors like "ولی"/"اما", find which clause contains the matched
-keyword, and only look for negation WITHIN that same clause.
+چرا بازنویسی شد؟
+-----------------
+نسخهٔ قبلی می‌پرسید «آیا *هر* فعل منفی در کلاز هست؟». این سؤال غلط است:
+در «دیگه طاقت ندارم نفس نمی‌تونم بکشم» فعل «ندارم» منفی است ولی به کلیدواژهٔ
+اورژانسی ربطی ندارد، و نسخهٔ قدیمی اورژانس واقعی را سرکوب می‌کرد.
+در triage.py هم پنجرهٔ ثابت ۱۲ کاراکتری همین خطا را داشت.
 
-Fails safe: if hazm or its POS model isn't available, every function
-here returns False (not negated), so the pipeline falls back to the
-existing fixed-window check in 2_triage.py -- nothing breaks.
+قاعدهٔ جدید (قطعی، بدون مدل آماری، بدون دانلود):
+  یک کلیدواژه فقط وقتی «نفی‌شده» است که
+    (الف) اولین واژهٔ معنی‌دار بعد از آن (با عبور از چند واژهٔ پرکننده مثل
+          «که/اصلا/الان/دیگه») یکی از افعال منفی بسته‌ی NEG_AFTER باشد
+          («درد قفسه سینه ندارم»، «تشنج که نداره»، «بیهوش شد نبود»)، یا
+    (ب) درست قبل از آن «نه/بدون/هیچ» بیاید («بدون تشنج»، «نه، تشنج نیست»).
+  همهٔ این‌ها فقط داخل *همان کلاز* بررسی می‌شود (کلاز با ، ؛ . ! ؟ و
+  ولی/اما/بلکه جدا می‌شود).
+  پیشوند «نمی» عمداً در لیست نیست: «نمی‌تونم/نمی‌کشه» خودش علامت اورژانس است.
 
-Setup (already done on your machine):
-    pip install hazm
-    # Your hazm version is older and doesn't support the newer
-    # repo_id/model_filename Hugging Face auto-download style, so we use
-    # a manually-downloaded model file instead, expected at:
-    #     app/pipeline/hazm_resources/pos_tagger.model
-    # (you already downloaded and placed it there.)
+hazm دیگر لازم نیست؛ hazm_available() برای سازگاری با triage.py همیشه True است.
+
+حد شناخته‌شده: جمله‌های پیچیده (نگیشن دوردست، طعنه، «نفس نمی‌کشه؟ نه، نفس می‌کشه»)
+را تشخیص نمی‌دهد. در این موارد عمداً «نفی‌نشده» برمی‌گردد (جهت ایمن).
 """
-import os
+from __future__ import annotations
+
 import re
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_POS_MODEL_PATH = os.path.join(_HERE, "hazm_resources", "pos_tagger.model")
+# --- افعال/واژه‌های نفی (فقط شکل کامل واژه، نه پیشوند) ----------------------
+NEG_AFTER = frozenset({
+    "ندارم", "نداره", "ندارد", "ندارن", "نداریم", "نداشتم", "نداشت", "نداشته",
+    "نبود", "نبودم", "نبوده", "نیست", "نیستم", "نیستن", "نشد", "نشده", "نشدم",
+    "نکرد", "نکرده", "نه",
+})
+NEG_BEFORE_1 = frozenset({"نه", "نخیر"})            # فقط واژهٔ بلافاصله قبل
+NEG_BEFORE_2 = frozenset({"بدون", "هیچ", "بی"})      # در دو واژهٔ قبل
 
-_tagger = None
-_hazm_available = None  # None = not checked yet
+# واژه‌های پرکننده‌ای که می‌توانند بین کلیدواژه و فعل منفی بیایند
+FILLERS = frozenset({
+    "که", "اصلا", "اصلاً", "هم", "الان", "دیگه", "هیچ", "خوشبختانه", "خدا", "رو",
+    "شکر", "فعلا", "الحمدلله", "اصلن", "تا", "حالا", "هنوز",
+})
+_MAX_FILLERS = 3
 
+# گذشته + بهبود (برای وضعیت «resolved_past»؛ سرکوب نمی‌کند، فقط برچسب می‌دهد)
+_PAST_MARKERS = ("قبلا", "قبلاً", "دیشب", "پارسال", "پریشب", "دیروز", "سال پیش", "ماه پیش")
+_RESOLVED_MARKERS = ("الان خوبم", "حالم خوبه", "حالم خوب", "خوب شدم", "بهتر شدم",
+                     "بهترم", "امروز خوبم", "امروز حالم خوبه", "خوبم")
 
-def _get_tagger():
-    """Lazy-load the hazm POS tagger once, from the local model file.
-    Returns None if hazm or the model file isn't available."""
-    global _tagger, _hazm_available
-    if _tagger is not None:
-        return _tagger
-    if _hazm_available is False:
-        return None
-    try:
-        from hazm import POSTagger
-        if not os.path.exists(_POS_MODEL_PATH):
-            _hazm_available = False
-            return None
-        _tagger = POSTagger(model=_POS_MODEL_PATH)
-        _hazm_available = True
-        return _tagger
-    except Exception:
-        # hazm not installed, model file missing/incompatible, etc. --
-        # fail safe rather than crash the whole pipeline.
-        _hazm_available = False
-        return None
+_BOUNDARY = re.compile(r"[،,؛;.!؟?\n]|(?<!\w)(?:ولی|اما|بلکه|ولیکن)(?!\w)")
 
 
 def hazm_available() -> bool:
-    """Call once to check if hazm is properly installed and usable."""
-    return _get_tagger() is not None
+    """سازگاری با triage.py: این ماژول دیگر به hazm نیاز ندارد، پس همیشه آماده است."""
+    return True
 
 
-# Persian negation forms/prefixes on verbs (broader than the plain-word
-# list in 2_triage.py, since here we only check tokens hazm already
-# tagged as verbs -- lower false-positive risk).
-_NEGATION_VERB_PREFIXES = ("نمی", "نخواه", "ندار", "نکرد", "نشد", "نبود", "نیست")
+def _clause_bounds(text: str, kw_start: int, kw_end: int):
+    """(clause_start, clause_end, prev_clause_text) برای کلاز حاوی کلیدواژه."""
+    c_start, c_end, prev_start = 0, len(text), 0
+    for m in _BOUNDARY.finditer(text):
+        if m.end() <= kw_start:
+            prev_start, c_start = c_start, m.end()
+        elif m.start() >= kw_end:
+            c_end = m.start()
+            break
+    return c_start, c_end, text[prev_start:c_start]
 
 
-def _is_negated_verb_token(word: str) -> bool:
-    return any(word.startswith(p) for p in _NEGATION_VERB_PREFIXES)
+def _first_content_token(tokens: list[str]) -> str | None:
+    skipped = 0
+    for tok in tokens:
+        tok = tok.strip("-–—\"'«»()")
+        if not tok:
+            continue
+        if tok in FILLERS and skipped < _MAX_FILLERS:
+            skipped += 1
+            continue
+        return tok
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Clause splitting
-# ---------------------------------------------------------------------------
-_CLAUSE_CONNECTORS = ["ولی", "اما"]
+def negation_status(text: str, kw_start: int, kw_end: int) -> str:
+    """'negated' | 'resolved_past' | 'affirmed' برای کلیدواژه در text[kw_start:kw_end]."""
+    c_start, c_end, prev_clause = _clause_bounds(text, kw_start, kw_end)
+    before = text[c_start:kw_start].split()
+    after = text[kw_end:c_end].split()
 
+    # (ب) نفی قبل از کلیدواژه
+    if before and before[-1] in NEG_BEFORE_1:
+        return "negated"
+    if any(t in NEG_BEFORE_2 for t in before[-2:]):
+        return "negated"
+    if not before and prev_clause.strip() in NEG_BEFORE_1:      # «نه، تشنج نیست»
+        return "negated"
 
-def split_into_clauses(text: str):
-    """
-    Splits text into clauses on "ولی"/"اما", returning a list of
-    (start_char_index, end_char_index, clause_text) tuples, indices
-    relative to the original `text`.
-    """
-    pattern = "|".join(re.escape(c) for c in _CLAUSE_CONNECTORS)
-    parts = []
-    last_end = 0
-    for m in re.finditer(pattern, text):
-        parts.append((last_end, m.start(), text[last_end:m.start()]))
-        last_end = m.end()
-    parts.append((last_end, len(text), text[last_end:]))
-    return parts
+    # (الف) نفی بعد از کلیدواژه
+    if _first_content_token(after) in NEG_AFTER:
+        return "negated"
 
-
-def _clause_containing(text: str, char_index: int):
-    """Returns the clause_text that contains the given character index."""
-    for start, end, clause_text in split_into_clauses(text):
-        if start <= char_index < end or (start <= char_index and end == len(text)):
-            return clause_text
-    return text  # fallback: whole text if index is out of range somehow
-
-
-def clause_has_negated_verb(clause_text: str) -> bool:
-    """True if hazm finds a negated verb within this single clause."""
-    tagger = _get_tagger()
-    if tagger is None:
-        return False
-    try:
-        from hazm import word_tokenize
-        tokens = word_tokenize(clause_text)
-        tagged = tagger.tag(tokens)
-    except Exception:
-        return False
-    return any(pos == "VERB" and _is_negated_verb_token(word) for word, pos in tagged)
+    # گذشته + بهبودیافته (فقط برچسب)
+    if any(p in " ".join(before) for p in _PAST_MARKERS) or any(p in text[:kw_start] for p in _PAST_MARKERS):
+        if any(r in text[c_end:] for r in _RESOLVED_MARKERS):
+            return "resolved_past"
+    return "affirmed"
 
 
 def is_negated_at(full_text: str, keyword_char_index: int, keyword_text: str = None) -> bool:
-    """
-    Main entry point: given the full sentence and the character index
-    where a dangerous keyword was found, checks whether the CLAUSE
-    containing that keyword has a negated verb -- i.e. whether the
-    keyword's own clause is being denied, ignoring negation in other,
-    unrelated clauses of the same sentence.
+    """امضای سازگار با نسخهٔ قبلی (triage.py همین را صدا می‌زند)."""
+    end = keyword_char_index + len(keyword_text or "")
+    return negation_status(full_text, keyword_char_index, end) == "negated"
 
-    `keyword_text`, if given, is removed from the clause before checking.
-    This matters because some keyword phrases themselves contain a
-    grammatically-negated verb that IS the danger itself (e.g. "نفس
-    نمی‌تونم بکشم" -- "I CAN'T breathe" -- contains "نمی‌تونم", which
-    looks like a negated verb but is the emergency, not a denial of it).
-    Without removing the keyword's own text first, hazm would wrongly
-    treat that as "this clause is negated" and suppress a real emergency.
-    """
-    clause = _clause_containing(full_text, keyword_char_index)
-    if keyword_text:
-        clause = clause.replace(keyword_text, " ")
-    return clause_has_negated_verb(clause)
+
+def is_negated_compact(compact_text: str, kw_end: int) -> bool:
+    """برای مسیر «متن بدون فاصله» در triage: فقط نفی بلافاصله بعد از کلیدواژه."""
+    rest = compact_text[kw_end:]
+    for w in sorted(NEG_AFTER - {"نه"}, key=len, reverse=True):
+        if rest.startswith(w):
+            return True
+    for f in FILLERS:                       # «که»، «اصلا» چسبیده
+        if rest.startswith(f):
+            rest2 = rest[len(f):]
+            if any(rest2.startswith(w) for w in NEG_AFTER - {"نه"}):
+                return True
+    return False
+
+
+# سازگاری با فراخوانی‌های قدیمی
+def clause_has_negated_verb(clause_text: str) -> bool:      # pragma: no cover
+    return _first_content_token(clause_text.split()) in NEG_AFTER
 
 
 if __name__ == "__main__":
-    if not hazm_available():
-        print("hazm POS tagger not available -- check installation, internet access, and Python version.")
-    else:
-        tests = [
-            ("سکته نکردم ولی دست راستم بی‌حس شده", "بی‌حس شده"),
-            ("درد قفسه سینه ندارم فقط خسته‌م", "درد قفسه سینه"),
-            ("درد نداره ولی نفس نمی‌تونم بکشم", "نفس نمی‌تونم بکشم"),
-        ]
-        for text, keyword in tests:
-            idx = text.find(keyword)
-            result = is_negated_at(text, idx, keyword_text=keyword)
-            print(f"{text!r}\n  clause negated? {result}\n")
+    cases = [
+        ("درد قفسه سینه ندارم فقط خسته‌م", "درد قفسه سینه", True),
+        ("درد نداره ولی نفس نمیتونم بکشم", "نفس نمیتونم بکشم", False),
+        ("دیگه طاقت ندارم نفس نمیتونم بکشم", "نفس نمیتونم بکشم", False),
+        ("نفس نمیتونم بکشم طاقت ندارم", "نفس نمیتونم بکشم", False),
+        ("داره تشنج میکنه که نداره فقط لرزه", "داره تشنج میکنه", True),
+        ("نه، بیهوش شد نیست", "بیهوش شد", True),
+        ("بدون خونریزی شدید اومدم", "خونریزی شدید", True),
+        ("دیشب خون بالا میارم ولی امروز حالم خوبه", "خون بالا میارم", False),
+    ]
+    for t, k, want in cases:
+        i = t.find(k)
+        got = is_negated_at(t, i, k)
+        print("OK " if got == want else "BUG", t, "->", got, negation_status(t, i, i + len(k)))
