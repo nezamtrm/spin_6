@@ -36,6 +36,7 @@ from specialties import BY_KEY, LABEL2ID, SPECIALTIES
 from text_utils import CSV_WRITE_ENCODING, normalize, setup_console
 
 RAW_JSON = Path("data/raw/parsbert_finetune_samples.json")
+RAW_DIR = Path("data/raw")
 
 # نام‌های فارسی تخصص‌هایی که در فایل JSON داده واقعی دارند (باید دقیقا با
 # specialties.py یکی باشند)
@@ -180,9 +181,18 @@ def main():
 
     all_rows = []
 
-    # ۱) داده واقعی (۵ تخصص)
-    real_rows = load_real_rows(Path(args.raw_json),
-                                augment_with_followup=not args.no_followup_augment)
+    # ۱) داده واقعی (۵ تخصص) + فایل‌های active learning در data/raw/*.json
+    json_paths = [Path(args.raw_json)]
+    raw_dir = Path(args.raw_json).parent if Path(args.raw_json).parent.exists() else RAW_DIR
+    for extra in sorted(raw_dir.glob("*.json")):
+        if extra.resolve() != Path(args.raw_json).resolve():
+            json_paths.append(extra)
+
+    real_rows = []
+    for jp in json_paths:
+        part = load_real_rows(jp, augment_with_followup=not args.no_followup_augment)
+        real_rows += part
+        print(f"  {jp.name}: {len(part)} نمونه")
     all_rows += real_rows
     print(f"داده واقعی بارگذاری شد: {len(real_rows)} نمونه "
           f"({'با' if not args.no_followup_augment else 'بدون'} تقویت سوال پیگیری)")
