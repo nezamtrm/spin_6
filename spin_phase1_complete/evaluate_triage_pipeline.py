@@ -103,7 +103,7 @@ def main() -> None:
              ("test.jsonl", "test.jsonl (پایپلاین کامل)"),
              ("golden_emergency.jsonl", "golden_emergency.jsonl (پایپلاین کامل)")]
     for filename, label in files:
-        path = _ROOT / "eval" / filename
+        path = _ROOT / filename
         if not path.exists():
             print(f"رد شد: eval/{filename} پیدا نشد")
             continue
