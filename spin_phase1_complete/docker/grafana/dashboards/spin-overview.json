@@ -1,0 +1,78 @@
+{
+  "title": "SPIN - نمای کلی پایپلاین",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "title": "نرخ درخواست (RPS)", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(rate(spin_requests_total[5m]))", "legendFormat": "rps"}]
+    },
+    {
+      "id": 2, "title": "خطاهای ۵۰۰ (نرخ)", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "targets": [{"expr": "sum(rate(spin_errors_500_total[5m]))", "legendFormat": "errors/s"}]
+    },
+    {
+      "id": 3, "title": "تریاژ - p99 latency (باید < 100ms باشد)", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "targets": [{"expr": "histogram_quantile(0.99, sum(rate(spin_triage_duration_ms_bucket[5m])) by (le))", "legendFormat": "p99 ms"}],
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "green", "value": null}, {"color": "red", "value": 100}]}}}
+    },
+    {
+      "id": 4, "title": "تشخیص اورژانس (نرخ)", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+      "targets": [{"expr": "rate(spin_emergency_detected_total[5m])", "legendFormat": "emergency/s"}]
+    },
+    {
+      "id": 5, "title": "توزیع درخواست بر اساس تخصص", "type": "piechart",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+      "targets": [{"expr": "sum by (specialty) (spin_specialty_requests_total)", "legendFormat": "{{specialty}}"}]
+    },
+    {
+      "id": 6, "title": "اطمینان روتر (p50/p90 به تخصص)", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum(rate(spin_router_confidence_bucket[15m])) by (le, specialty))", "legendFormat": "p50 {{specialty}}"},
+        {"expr": "histogram_quantile(0.9, sum(rate(spin_router_confidence_bucket[15m])) by (le, specialty))", "legendFormat": "p90 {{specialty}}"}
+      ]
+    },
+    {
+      "id": 7, "title": "نرخ Cache Hit", "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 16},
+      "targets": [{"expr": "sum(rate(spin_cache_hits_total[15m])) / (sum(rate(spin_cache_hits_total[15m])) + sum(rate(spin_cache_misses_total[15m])) + 1e-9)", "legendFormat": "hit rate"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "id": 8, "title": "safety_block به تفکیک دلیل", "type": "timeseries",
+      "gridPos": {"h": 6, "w": 9, "x": 6, "y": 16},
+      "targets": [{"expr": "sum by (reason) (rate(spin_safety_blocks_total[15m]))", "legendFormat": "{{reason}}"}]
+    },
+    {
+      "id": 9, "title": "روتر: fallback شدن (باید نزدیک صفر باشد)", "type": "stat",
+      "gridPos": {"h": 6, "w": 4, "x": 15, "y": 16},
+      "targets": [{"expr": "sum(increase(spin_router_fallback_total[1h]))", "legendFormat": "fallback/1h"}]
+    },
+    {
+      "id": 10, "title": "RAG: توزیع تعداد منبع بازیابی‌شده", "type": "timeseries",
+      "gridPos": {"h": 6, "w": 5, "x": 19, "y": 16},
+      "targets": [{"expr": "histogram_quantile(0.5, sum(rate(spin_rag_sources_found_bucket[15m])) by (le))", "legendFormat": "median"}]
+    },
+    {
+      "id": 11, "title": "پرونده ابتدایی: in_progress vs completed", "type": "timeseries",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 22},
+      "targets": [{"expr": "sum by (status) (rate(spin_patient_record_status_total[15m]))", "legendFormat": "{{status}}"}]
+    },
+    {
+      "id": 12, "title": "استریم vLLM - p50/p95 مدت زمان", "type": "timeseries",
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 22},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum(rate(spin_vllm_stream_duration_seconds_bucket[15m])) by (le))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(spin_vllm_stream_duration_seconds_bucket[15m])) by (le))", "legendFormat": "p95"}
+      ]
+    }
+  ]
+}

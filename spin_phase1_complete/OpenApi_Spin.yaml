@@ -1,0 +1,375 @@
+openapi: 3.0.0
+info:
+  title: Spin API
+  version: 1.1.0
+  description:     سرویس داخلی مشاوره پزشکی فارسی Q&A با مسیریابی per-body-part.
+servers:
+  - url: http://ai-service.internal:8080/v1
+    description: Production شبکه داخلی
+  - url: http://ai-staging.internal:8080/v1
+    description: Staging
+  - url: http://localhost:8080/v1
+    description: Local development
+tags:
+  - name: chat
+    description: اندپوینت اصلی مشاوره پزشکی
+  - name: health
+    description: سلامت و آمادگی برای autoscaling
+security:
+  - ServiceToken: []
+paths:
+  /medical/chat:
+    post:
+      tags: [chat]
+      summary: مشاوره پزشکی با پاسخ Streaming
+      x-mvp-phase: 1
+      operationId: medicalChat
+      description: |
+        اندپوینت اصلی. خروجی SSE با فرمت `data: <JSON>\n\n` + `id:` + `retry: 3000`.
+        ترتیب (اصلاح‌شده نسخه ۱.۱ - گارد و تریاژ قبل از روتر، برای latency
+        بهتر روی دقیقا همان مسیری که به سرعت حساس‌ترین است، بدون افت دقت
+        در هیچ مرحله‌ای): `safety_block -> done` | `emergency -> done` |
+        (`start` -> [`cached`] -> `token`* -> `citation` -> `structured` -> `done`)
+        یعنی `start` دیگر رویداد مطلقا اول نیست؛ فقط در مسیر عادی (نه
+        emergency/safety_block) و بعد از تشخیص تخصص توسط روتر می‌آید - چون
+        specialty/confidence که در آن الزامی‌اند، فقط آن‌جا معنا دارند.
+        هر 15s یک `heartbeat` برای زنده نگه داشتن کانکشن ارسال می شود.
+        Backend مسئول: session, hash user_id با SHA256, rate-limit.
+        این سرویس مسئول (به همین ترتیب اجرا): گارد ورودی، triage اورژانس
+        زیر 100ms، روتر تخصص، کش، RAG، inference، گارد خروجی.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: جریان SSE
+          headers:
+            X-Request-ID:
+              schema: {type: string, format: uuid}
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/SSEStream'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /health:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      x-mvp-phase: 1
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: سرویس زنده است
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HealthStatus'}
+  /ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      x-mvp-phase: 1
+      operationId: readinessCheck
+      description: چک vLLM, Qdrant, embedder, cache, GPU برای HPA/KEDA
+      security: []
+      responses:
+        '200':
+          description: آماده سرویس دهی
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReadinessStatus'}
+        '503':
+          description: آماده نیست
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReadinessStatus'}
+  /metrics:
+    get:
+      tags: [health]
+      summary: Prometheus metrics
+      x-mvp-phase: 1
+      description: فقط داخلی scrape می شود
+      operationId: metrics
+      security: []
+      responses:
+        '200':
+          description: متریک ها فرمت Prometheus
+          content:
+            text/plain:
+              schema: {type: string}
+components:
+  securitySchemes:
+    ServiceToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: توکن سرویس به سرویس auth داخلی
+  schemas:
+    ChatRequest:
+      type: object
+      required: [request_id, session_id, user_hash, query]
+      properties:
+        request_id: {type: string, format: uuid}
+        session_id: {type: string, format: uuid}
+        user_hash:
+          type: string
+          minLength: 64
+          maxLength: 64
+          pattern: '^[a-f0-9]{64}$'
+          description: SHA-256 از user_id - هرگز خام ارسال نشود
+        query: {type: string, minLength: 1, maxLength: 2000, description: سوال فارسی}
+        selected_body_part:
+          type: string
+          description: اختیاری - اگر نباشد router تشخیص می دهد
+          enum: [gynecology, orthopedics, dentistry, speech_therapy, general_surgery, general_practice]
+        conversation_history:
+          type: array
+          maxItems: 6
+          description: فقط 6 پیام آخر، Backend خلاصه کند برای کنترل latency
+          items: {$ref: '#/components/schemas/Message'}
+        metadata: {$ref: '#/components/schemas/UserMetadata'}
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 0.5
+          default: 0.2
+          description: برای پزشکی حداکثر 0.5 - دقت بر خلاقیت اولویت دارد
+    Message:
+      type: object
+      required: [role, content]
+      properties:
+        role: {type: string, enum: [user, assistant]}
+        content: {type: string, maxLength: 1000}
+        timestamp: {type: string, format: date-time}
+    UserMetadata:
+      type: object
+      properties:
+        age_range: {type: string, enum: ["0-12", "13-18", "19-30", "30-40", "40-50", "50-60", "60+"]}
+        gender: {type: string, enum: [M, F, O]}
+        language: {type: string, enum: [fa, en], default: fa}
+        preferred_style: {type: string, enum: [formal, casual], default: formal}
+    SSEStream:
+      description: >-
+        هر رویداد `data: <JSON>\n\n` انواع: start, token, citation, emergency,
+        safety_block, structured, cached, heartbeat, error, done
+      oneOf:
+        - $ref: '#/components/schemas/EventStart'
+        - $ref: '#/components/schemas/EventToken'
+        - $ref: '#/components/schemas/EventCitation'
+        - $ref: '#/components/schemas/EventEmergency'
+        - $ref: '#/components/schemas/EventSafetyBlock'
+        - $ref: '#/components/schemas/EventStructured'
+        - $ref: '#/components/schemas/EventCached'
+        - $ref: '#/components/schemas/EventHeartbeat'
+        - $ref: '#/components/schemas/EventError'
+        - $ref: '#/components/schemas/EventDone'
+    EventStart:
+      type: object
+      required: [type, request_id, specialty, confidence]
+      properties:
+        type: {type: string, enum: [start]}
+        request_id: {type: string, format: uuid}
+        specialty:
+          type: string
+          enum: [gynecology, orthopedics, dentistry, speech_therapy, general_surgery, general_practice]
+        confidence: {type: number, minimum: 0, maximum: 1}
+    EventToken:
+      type: object
+      required: [type, request_id, content]
+      properties:
+        type: {type: string, enum: [token]}
+        request_id: {type: string, format: uuid}
+        content: {type: string}
+        seq: {type: integer, description: شماره ترتیب توکن برای reorder}
+    EventCitation:
+      type: object
+      required: [type, request_id, sources]
+      properties:
+        type: {type: string, enum: [citation]}
+        request_id: {type: string, format: uuid}
+        sources: {type: array, items: {$ref: '#/components/schemas/Source'}}
+    Source:
+      type: object
+      required: [title, relevance]
+      properties:
+        title: {type: string}
+        url: {type: string, format: uri}
+        author: {type: string}
+        published_date: {type: string, format: date}
+        relevance: {type: number, minimum: 0, maximum: 1}
+    EventEmergency:
+      type: object
+      required: [type, request_id, severity, message, action]
+      description: بلافاصله بعد از start می آید و جریان قطع می شود - باید زیر 100ms باشد
+      properties:
+        type: {type: string, enum: [emergency]}
+        request_id: {type: string, format: uuid}
+        severity: {type: string, enum: [high, critical]}
+        message: {type: string, description: پیام فارسی قابل نمایش}
+        action: {type: string, enum: [call_115, go_er]}
+    EventSafetyBlock:
+      type: object
+      required: [type, request_id, reason, message]
+      properties:
+        type: {type: string, enum: [safety_block]}
+        request_id: {type: string, format: uuid}
+        reason: {type: string, enum: [unsafe_input, unsafe_output, off_topic, pii_detected, low_confidence]}
+        message: {type: string, description: پیام کاربرپسند فارسی}
+    EventStructured:
+      type: object
+      required: [type, request_id, structured]
+      properties:
+        type: {type: string, enum: [structured]}
+        request_id: {type: string, format: uuid}
+        structured: {$ref: '#/components/schemas/StructuredMedicalResponse'}
+    EventCached:
+      type: object
+      required: [type, request_id, similarity]
+      properties:
+        type: {type: string, enum: [cached]}
+        request_id: {type: string, format: uuid}
+        similarity: {type: number, minimum: 0, maximum: 1, description: شباهت semantic با سوال کش شده}
+    EventHeartbeat:
+      type: object
+      required: [type, request_id]
+      properties:
+        type: {type: string, enum: [heartbeat]}
+        request_id: {type: string, format: uuid}
+        timestamp: {type: string, format: date-time}
+    EventError:
+      type: object
+      required: [type, request_id, code, message]
+      properties:
+        type: {type: string, enum: [error]}
+        request_id: {type: string, format: uuid}
+        code: {type: string, enum: [model_error, retrieval_error, timeout, internal]}
+        message: {type: string}
+        retryable: {type: boolean}
+    EventDone:
+      type: object
+      required: [type, request_id, total_tokens, latency_ms, cached]
+      properties:
+        type: {type: string, enum: [done]}
+        request_id: {type: string, format: uuid}
+        total_tokens: {type: integer}
+        prompt_tokens: {type: integer}
+        completion_tokens: {type: integer}
+        latency_ms: {type: integer}
+        cached: {type: boolean, default: false}
+        specialty:
+          type: string
+          description: فقط در مسیر عادی هست؛ در safety_block/emergency اصلا فرستاده نمی‌شود چون روتر اجرا نشده
+    StructuredMedicalResponse:
+      type: object
+      required: [summary, recommendations, urgency, disclaimer]
+      properties:
+        summary: {type: string}
+        recommendations: {type: array, items: {type: string}}
+        urgency: {type: string, enum: [low, medium, high, critical]}
+        sources: {type: array, items: {$ref: '#/components/schemas/Source'}}
+        disclaimer:
+          type: string
+          description: الزامی - نباید حذف یا خالی باشد
+          example: "این مشاوره جایگزین تشخیص و ویزیت حضوری پزشک نیست. در موارد اورژانسی فورا با 115 تماس بگیرید."
+        needs_human_review:
+          type: boolean
+          default: false
+          description: 'قانون: true اگر confidence_score<0.6 یا urgency in [high,critical]'
+        detected_specialty: {type: string}
+        confidence_score: {type: number, minimum: 0, maximum: 1}
+        patient_record:
+          description: |
+            پرونده ابتدایی بیمار (مرحله ۶.۵ pipeline) - خلاصه‌ای structured از
+            همین مکالمه، برای اینکه پزشک/تخصص مقصد در صورت ارجاع سریع در
+            جریان قرار بگیرد. یک پرونده پزشکی رسمی/قانونی نیست. هرگز نباید
+            بین کاربران/مکالمات مختلف کش یا به اشتراک گذاشته شود.
+          allOf:
+            - $ref: '#/components/schemas/PatientRecord'
+    PatientIntakeQA:
+      type: object
+      required: [question, answer]
+      properties:
+        question: {type: string}
+        answer: {type: string}
+    PatientRecord:
+      type: object
+      required: [specialty, specialty_fa, chief_complaint, status]
+      properties:
+        specialty: {type: string}
+        specialty_fa: {type: string}
+        chief_complaint: {type: string}
+        qa_pairs:
+          type: array
+          items: {$ref: '#/components/schemas/PatientIntakeQA'}
+        status:
+          type: string
+          enum: [in_progress, completed]
+          description: in_progress = هنوز سوال تکمیلی در جریان است، completed = جمع‌بندی/ارجاع نهایی شده
+    HealthStatus:
+      type: object
+      required: [status, version]
+      properties:
+        status: {type: string, enum: [healthy]}
+        version: {type: string}
+        uptime_seconds: {type: integer}
+    ReadinessStatus:
+      type: object
+      required: [status, components]
+      properties:
+        status: {type: string, enum: [ready, not_ready]}
+        components:
+          type: object
+          properties:
+            vllm: {type: string, enum: [up, down]}
+            qdrant: {type: string, enum: [up, down]}
+            embedder: {type: string, enum: [up, down]}
+            cache: {type: string, enum: [up, down]}
+            gpu: {type: string, enum: [available, unavailable]}
+            gpu_memory_used_gb: {type: number, description: مصرف فعلی از 80 گیگ}
+            queue_depth: {type: integer, description: تعداد ریکوئست در صف vLLM}
+            model_version: {type: string, example: qwen2.5-32B-AWQ-v1}
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error: {type: string}
+        message: {type: string}
+        request_id: {type: string, format: uuid}
+        timestamp: {type: string, format: date-time}
+  responses:
+    BadRequest:
+      description: درخواست نامعتبر
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: توکن سرویس نامعتبر
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    RateLimited:
+      description: تعداد درخواست بیش از حد
+      headers:
+        Retry-After: {schema: {type: integer}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    InternalError:
+      description: خطای داخلی
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    ServiceUnavailable:
+      description: GPU پایین، مدل در حال بارگذاری
+      headers:
+        Retry-After: {schema: {type: integer}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}

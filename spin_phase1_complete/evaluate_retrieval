@@ -1,0 +1,110 @@
+"""
+evaluate_retrieval.py
+
+سنجش کیفیت RAG (app/pipeline/retriever.py) روی یک «gold retrieval set» -
+مجموعه‌ای دست‌ساز از (سوال بیمار -> عنوان سندی که *باید* بازیابی شود).
+
+این فایل داده RAG را نمی‌سازد و در Qdrant چیزی upsert نمی‌کند - فقط
+retriever.retrieve() موجود را صدا می‌زند و نتیجه را با پاسخ درست مقایسه
+می‌کند. پس اجرایش به این نیاز دارد: (۱) Qdrant بالا باشد، (۲) کالکشن‌های
+spin_kb_<specialty> از قبل با محتوای واقعی پر شده باشند .
+تا آن موقع، این اسکریپت فقط recall=0 برای همه می‌دهد - که خودش یعنی «هنوز
+محتوایی برای بازیابی نیست»، نه یک باگ.
+
+فرمت eval/gold_retrieval.jsonl:
+    {"query": "دندون عقلم درد میکنه و تب دارم", "specialty": "dentistry",
+     "expected_titles": ["آبسه دندان و علائم آن"]}
+یک query می‌تواند چند expected_titles داشته باشد (یعنی هرکدام بیاید کافی است).
+
+معیارها:
+  - recall@k: در چند درصد سوال‌ها، حداقل یکی از expected_titles در بین
+    top-k بازیابی‌شده بود؟ (معیار اصلی طبق جدول تسک‌ها)
+  - MRR (Mean Reciprocal Rank): میانگین 1/rank اولین سند درستی که پیدا شد
+    (به رتبه هم حساس است، نه فقط حضور/غیاب - سند درست در جایگاه ۱ بهتر از
+    جایگاه ۵ است، حتی اگر هر دو در recall@5 "hit" حساب شوند)
+
+اجرا:
+    python evaluate_retrieval.py                              # تنظیمات فعلی config.py
+    python evaluate_retrieval.py --sweep-top-k 3,5,8
+    python evaluate_retrieval.py --sweep-weights 1.0:0,0.75:0.25,0.5:0.5,0:1.0
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+from app.pipeline.retriever import retrieve
+
+_ROOT = Path(__file__).resolve().parent
+
+
+def load_gold(path: Path) -> list[dict]:
+    with path.open(encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def score_once(gold_rows: list[dict], top_k: int, vector_weight: float | None, lexical_weight: float | None):
+    hits, reciprocal_ranks, misses = 0, [], []
+    for row in gold_rows:
+        results = retrieve(
+            row["specialty"], row["query"], top_k=top_k,
+            vector_weight=vector_weight, lexical_weight=lexical_weight,
+        )
+        titles = [r["title"] for r in results]
+        expected = set(row["expected_titles"])
+
+        rank = next((i + 1 for i, t in enumerate(titles) if t in expected), None)
+        if rank:
+            hits += 1
+            reciprocal_ranks.append(1 / rank)
+        else:
+            reciprocal_ranks.append(0.0)
+            misses.append(row)
+
+    n = len(gold_rows)
+    recall = hits / n if n else float("nan")
+    mrr = sum(reciprocal_ranks) / n if n else float("nan")
+    return recall, mrr, misses
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gold", default="eval/gold_retrieval.jsonl")
+    ap.add_argument("--sweep-top-k", default=None, help="مثلا 3,5,8 - چند top_k را با هم مقایسه کن")
+    ap.add_argument("--sweep-weights", default=None,
+                     help="مثلا '1.0:0,0.75:0.25,0.5:0.5' (vector:lexical) - چند ترکیب وزن را مقایسه کن")
+    ap.add_argument("--show-misses", action="store_true")
+    args = ap.parse_args()
+
+    path = _ROOT / args.gold
+    if not path.exists():
+        raise SystemExit(f"{path} پیدا نشد - اول این فایل را طبق فرمت بالا بسازید.")
+    gold_rows = load_gold(path)
+    print(f"{len(gold_rows)} سوال در gold set\n")
+
+    if args.sweep_top_k:
+        print(f"{'top_k':>8} {'recall':>10} {'MRR':>10}")
+        for k in [int(x) for x in args.sweep_top_k.split(",")]:
+            recall, mrr, _ = score_once(gold_rows, k, None, None)
+            print(f"{k:>8} {recall:>10.1%} {mrr:>10.3f}")
+        return
+
+    if args.sweep_weights:
+        print(f"{'vector:lexical':>16} {'recall':>10} {'MRR':>10}")
+        for combo in args.sweep_weights.split(","):
+            vw, lw = (float(x) for x in combo.split(":"))
+            recall, mrr, _ = score_once(gold_rows, 5, vw, lw)
+            print(f"{vw:.2f}:{lw:.2f}".rjust(16) + f" {recall:>10.1%} {mrr:>10.3f}")
+        return
+
+    recall, mrr, misses = score_once(gold_rows, 5, None, None)
+    print(f"recall@5: {recall:.1%}   MRR: {mrr:.3f}")
+    if args.show_misses and misses:
+        print("\nسوالاتی که هیچ سند مورد انتظاری در نتیجه‌شان نبود:")
+        for m in misses:
+            print(f"  [{m['specialty']}] {m['query']}  (انتظار: {m['expected_titles']})")
+
+
+if __name__ == "__main__":
+    main()
