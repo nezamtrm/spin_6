@@ -59,8 +59,10 @@ EMERGENCY_KEYWORDS: set[str] = {
     "الکل صنعتی خوردم", "قارچ جنگلی خوردیم",
     "قرص زیادی خوردم", "قرص خواب زیادی خوردم", "زیادی قرص خوردم", "اشتباهی قرص زیاد خوردم",
     "دارو زیادی خوردم", "اوردوز کردم",
-    # radiating/shooting pain phrase (explicitly given as an example in the task)
-    
+    # NOTE: «تیر میکشه» تنها حذف شد: دندان‌درد/زانو/کمر هم «تیر می‌کشد» و همه را
+    # به ۱۱۵ می‌فرستاد. فقط ترکیب با ناحیهٔ قلبی-تنفسی نگه داشته شد (تأیید پزشک لازم).
+    "سینم تیر میکشه", "قفسه سینم تیر میکشه", "تیر میکشه تو بازوی چپ",
+    "تیر میکشه تو فکم", "تیر میکشه به بازوم", "دردش میزنه به بازو و فک",
     # bleeding
     "خونریزی شدید", "خون بند نمیاد", "خون زیاد میره", "استفراغ خونی",
     "خون بالا میارم", "خونریزی از واژن", "خون زیادی از دست داد",
@@ -172,58 +174,105 @@ def _hazm_says_negated(normalized_text: str, keyword_char_index: int, keyword_te
 
 
 def rule_based_check(text: str) -> bool:
-    """True if any known danger phrase is a substring of the (normalized) text,
-    checked both with normal spacing and with all whitespace stripped (to
-    tolerate ZWNJ/space/no-separator variation in compound words). A match
-    immediately followed by a negation word ("ندارم", "نیست", ...) is
-    discarded, so "درد قفسه سینه ندارم" isn't flagged as an emergency.
+    """True اگر یکی از عبارت‌های خطر در متن باشد و *نفی‌نشده* باشد.
 
-    If a keyword matches (the rare path -- most sentences won't match at
-    all), and hazm is available, we ALSO run a clause-aware negation check
-    with hazm (see hazm_negation.py) as a second opinion -- this is the
-    "conditional pipeline": the heavier hazm check only runs when a
-    keyword was already found, so the common case (no match) stays fast.
+    تغییرات نسبت به نسخهٔ قبل:
+      - همهٔ occurrenceها بررسی می‌شوند (قبلاً فقط اولین find؛ اگر اولین نفی‌شده
+        بود و دومی واقعی، اورژانس گم می‌شد).
+      - نگیشن فقط با hazm_negation.is_negated_at (اولین واژهٔ معنی‌دار بعد از
+        کلیدواژه / نفی بلافاصله قبلش) تعیین می‌شود؛ پنجرهٔ ۱۲ کاراکتری فقط
+        وقتی استفاده می‌شود که ماژول نگیشن بالا نیامده باشد.
+      - مسیر «بدون فاصله» فقط برای کلیدواژه‌هایی است که در متن عادی اصلاً پیدا
+        نشده‌اند (قبلاً یک نگیشن‌شدهٔ عادی از این مسیر دوباره پرچم می‌خورد).
     """
     normalized = normalize(text)
-    for kw in _NORMALIZED_KEYWORDS:
-        idx = normalized.find(kw)
-        if idx != -1 and not _has_nearby_negation(normalized, idx + len(kw)):
-            if _hazm_says_negated(normalized, idx, kw):
-                continue
-            return True
+    neg = _get_hazm_negation_module()
+
+    def negated(hay: str, idx: int, kw: str) -> bool:
+        if neg is not None:
+            return neg.is_negated_at(hay, idx, kw)
+        return _has_nearby_negation(hay, idx + len(kw))
+
     compact = normalized.replace(" ", "")
-    for kw in _COMPACT_KEYWORDS:
-        idx = compact.find(kw)
-        if idx != -1 and not _has_nearby_negation(compact, idx + len(kw)):
-            return True
+    for kw in _NORMALIZED_KEYWORDS:
+        found_plain = False
+        start = 0
+        while True:
+            idx = normalized.find(kw, start)
+            if idx == -1:
+                break
+            found_plain = True
+            if not negated(normalized, idx, kw):
+                return True
+            start = idx + len(kw)
+        if found_plain:
+            continue
+        ckw = kw.replace(" ", "")
+        start = 0
+        while True:
+            idx = compact.find(ckw, start)
+            if idx == -1:
+                break
+            end = idx + len(ckw)
+            neg_c = neg.is_negated_compact(compact, end) if neg is not None else _has_nearby_negation(compact, end)
+            if not neg_c:
+                return True
+            start = end
     return False
 
 
 # ---------------------------------------------------------------------------
 # Stage 2: FastText model (lazy-loaded)
 # ---------------------------------------------------------------------------
-_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "triage_model.bin")
+_MODEL_PATH = os.environ.get(
+    "TRIAGE_MODEL_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "triage_model.bin"),
+)
+# آستانهٔ احتمال critical. 0.5 = argmax. برای ایمنی پایین‌تر است؛ مقدار نهایی را با
+# evaluate روی val گروهی (کلیدواژه‌های دیده‌نشده) تعیین کنید، نه حدسی.
+FT_THRESHOLD = float(os.environ.get("TRIAGE_FT_THRESHOLD", "0.30"))
 _model = None  # loaded on first use, not at import time
 
 
+def _patch_fasttext_numpy2(ft_module) -> None:
+    """fasttext.predict با numpy>=2 خطا می‌دهد (np.array(copy=False)). این پچ
+    قبلاً فقط در اسکریپت‌های آموزش بود و مسیر production را نمی‌پوشاند."""
+    import numpy as np
+    orig = np.array
+
+    def _compat(obj, copy=False, **kw):
+        return orig(obj, copy=copy, **kw) if copy else np.asarray(obj, **kw)
+
+    ft_module.np.array = _compat
+
+
 def _get_model():
-    """Load the FastText model once and cache it. Returns None if the model
-    file isn't present yet (e.g. before training has been run)."""
+    """Load the FastText model once. None اگر فایل نباشد."""
     global _model
     if _model is None and os.path.exists(_MODEL_PATH):
-        import fasttext  # imported lazily so rule-only usage doesn't need it installed
+        import fasttext  # lazy
+        import fasttext.FastText as _ftm
+        _patch_fasttext_numpy2(_ftm)
         _model = fasttext.load_model(_MODEL_PATH)
     return _model
 
 
-def fasttext_check(text: str) -> bool:
-    """True if the FastText model predicts the 'critical' label for this text."""
+def fasttext_check(text: str, threshold: float | None = None) -> bool:
+    """True اگر P(critical) >= threshold. هر خطای مدل -> False (لایهٔ قانون قبلاً
+    اجرا شده)؛ ولی خطا لاگ می‌شود تا بی‌صدا نماند."""
     model = _get_model()
     if model is None:
-        return False  # no model available -- fail safe to "not flagged by this stage"
-    normalized = normalize(text).replace("\n", " ")
-    labels, probs = model.predict(normalized, k=1)
-    return labels[0] == "__label__critical"
+        return False
+    thr = FT_THRESHOLD if threshold is None else threshold
+    try:
+        normalized = normalize(text).replace("\n", " ")
+        labels, probs = model.predict(normalized, k=2)
+        p = {l: float(x) for l, x in zip(labels, probs)}
+        return p.get("__label__critical", 0.0) >= thr
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("fasttext_predict_failed")
+        return False
 
 
 # ---------------------------------------------------------------------------
