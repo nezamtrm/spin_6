@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sp = importlib.util.spec_from_file_location("triage", ROOT / "app" / "pipeline" / "triage.py")
 triage = importlib.util.module_from_spec(sp); sp.loader.exec_module(triage)
-THRESHOLDS = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70]
+THRESHOLDS = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
 
 
 def load(name):
@@ -58,6 +58,14 @@ def main():
     model = triage._get_model()
     if model is None:
         sys.exit("❌ app/pipeline/triage_model.bin پیدا نشد؛ اول train_fasttext.py")
+    import time
+    mp = Path(triage._MODEL_PATH)
+    tr = ROOT / "eval" / "train.jsonl"
+    print(f"مدل  : {mp}  ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mp.stat().st_mtime))})")
+    print(f"train: {tr}  ({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(tr.stat().st_mtime))})")
+    if mp.stat().st_mtime < tr.stat().st_mtime:
+        print("⚠ مدل *قدیمی‌تر* از train.jsonl است: بعد از prepare_triage_data.py آموزش دوباره نداده‌اید "
+              "(یا مدل جای دیگری ذخیره شده). نتایج زیر معتبر نیست؛ اول python train_fasttext.py.")
     val, test = prep(model, load("val.jsonl")), prep(model, load("test_grouped.jsonl"))
     nvc = sum(x["gold"] for x in val)
     print(f"val: n={len(val)} (critical={nvc})   test: n={len(test)} (critical={sum(x['gold'] for x in test)})")
