@@ -58,14 +58,19 @@ triage = _load_triage_module()
 # ----------------------------------------------------------------------------
 # قالب‌ها
 # ----------------------------------------------------------------------------
-CRITICAL_TEMPLATES = [
-    "{kw}", "کمک کنید {kw}", "دکتر {kw}", "فوریه، {kw}", "الان {kw}", "یهو {kw}",
-    "بچم {kw}", "پدرم {kw}", "مادرم {kw}", "همین الان {kw} چیکار کنم",
-    "{kw}، بگید چیکار کنم", "خواهش میکنم زود بگید {kw}", "{kw} کمک فوری میخوام",
-    "همسرم {kw} چیکار کنم", "آقای دکتر فوریه {kw}", "والا {kw} داغون شدم",
-    "بابا دیگه {kw} بگید چی کار کنم", "از دیشب تا الان {kw}",
-    "{kw} تو راه اومدم اورژانس", "لطفا بگید {kw} خطرناکه؟ فوریه",
+# قالب‌های «خنثی»: هیچ بار فوریتی ندارند و برای هر دو کلاس استفاده می‌شوند، تا
+# توکن‌هایی مثل «بگید/چیکار/دکتر/پدرم» پیش‌بینی‌کنندهٔ برچسب نشوند (shortcut).
+NEUTRAL_FRAMES = [
+    "دکتر {kw}", "الان {kw}", "یهو {kw}", "بچم {kw}", "پدرم {kw}", "مادرم {kw}",
+    "همین الان {kw} چیکار کنم", "{kw}، بگید چیکار کنم", "همسرم {kw} چیکار کنم",
+    "والا {kw} داغون شدم", "بابا دیگه {kw} بگید چی کار کنم", "از دیشب تا الان {kw}",
 ]
+# قالب‌های «فوری»: خودشان سیگنال واقعی‌اند و فقط برای critical به کار می‌روند.
+URGENT_FRAMES = [
+    "کمک کنید {kw}", "فوریه، {kw}", "خواهش میکنم زود بگید {kw}", "{kw} کمک فوری میخوام",
+    "آقای دکتر فوریه {kw}", "{kw} تو راه اومدم اورژانس", "لطفا بگید {kw} خطرناکه؟ فوریه",
+]
+CRITICAL_TEMPLATES = ["{kw}"] + NEUTRAL_FRAMES + URGENT_FRAMES
 NEGATION_TEMPLATES = [
     "{kw} ندارم", "{kw} نداره", "خدا رو شکر {kw} نشد", "نه، {kw} نیست",
     "نگران {kw} بودم ولی نشد", "{kw} که نداره، فقط سرما خورده",
@@ -119,8 +124,11 @@ def gen_template_rows(rng: random.Random, templates_per_kw: int):
     return rows
 
 
-def load_routine(parsbert_data: Path):
-    rows = []
+def load_routine(parsbert_data: Path, keep_followup: bool = False):
+    """جمله‌های روزمره از CSVهای ParsBERT. بخش بعد از «؛» سؤال پیگیریِ سیستم است
+    (artifact تقویت داده‌ی روتر)، نه حرف بیمار؛ در تریاژ یک نشانهٔ سبک کاذب می‌شد
+    (۴۳٪ روزمره‌ها «؛» داشتند و ۰٪ اورژانسی‌ها)، پس پیش‌فرض حذف می‌شود."""
+    rows, seen = [], set()
     for name in ("train.csv", "validation.csv", "test.csv"):
         p = parsbert_data / name
         if not p.exists():
@@ -128,9 +136,13 @@ def load_routine(parsbert_data: Path):
         with p.open(encoding="utf-8-sig", newline="") as f:
             for r in csv.DictReader(f):
                 t = (r.get("text") or "").strip()
-                if t:
-                    base = re.split(r"[؛;]", t)[0].strip()
-                    rows.append(dict(text=t, urgency="non_critical", group=f"r:{base}", source="routine"))
+                if not t:
+                    continue
+                base = re.split(r"[؛;]", t)[0].strip()
+                text = t if keep_followup else base
+                if text and text not in seen:
+                    seen.add(text)
+                    rows.append(dict(text=text, urgency="non_critical", group=f"r:{base}", source="routine"))
     return rows
 
 
@@ -182,13 +194,73 @@ def write_jsonl(path: Path, rows):
                                ensure_ascii=False) + "\n")
 
 
+def wrap_neutral(rows, rng, p):
+    """بخشی از جمله‌های غیراورژانسی را در قالب‌های خنثی می‌پیچد (همان قالب‌هایی که
+    critical هم دارد) تا قالب، نشانهٔ برچسب نباشد."""
+    out = []
+    for r in rows:
+        if r["urgency"] == "non_critical" and r["source"] in ("routine", "llm") and rng.random() < p:
+            r = dict(r, text=rng.choice(NEUTRAL_FRAMES).format(kw=r["text"]))
+        out.append(r)
+    return out
+
+
+def llm_assignment(rows, seed, val_frac, test_frac):
+    """مفاهیم LLM کم‌اند (مثلاً ۵ تا)؛ hash ممکن است همه را به train ببرد و val/test
+    هیچ نمونهٔ «بدون کلیدواژه» نداشته باشد. پس برای هر برچسب سهمیهٔ قطعی می‌دهیم:
+    حداقل ۱ مفهوم val و ۱ مفهوم test (وقتی ≥۳ مفهوم داریم)."""
+    by_u = defaultdict(set)
+    for r in rows:
+        if r["source"] == "llm":
+            by_u[r["urgency"]].add(r["group"])
+    assign = {}
+    for u, gs in by_u.items():
+        gs = sorted(gs, key=lambda g: hashlib.sha1(f"{seed}:{g}".encode("utf-8")).hexdigest())
+        n = len(gs)
+        if n >= 3:
+            nv = min(max(1, round(n * val_frac)), (n - 1) // 2)
+            nt = min(max(1, round(n * test_frac)), (n - 1) // 2)
+            for i, g in enumerate(gs):
+                assign[g] = "test" if i < nt else ("val" if i < nt + nv else "train")
+        else:
+            for g in gs:
+                assign[g] = split_of(g, seed, val_frac, test_frac)
+    return assign
+
+
+def shortcut_audit(rows, top=10, min_count=20):
+    """توکن‌ها/سبک‌هایی که برچسب را لو می‌دهند. اگر توکن بی‌ربط (نه پزشکی) در ردیف
+    بالا باشد، مدل همان را یاد می‌گیرد، نه بیماری را."""
+    c, n = Counter(), Counter()
+    nc = sum(r["urgency"] == "critical" for r in rows); nn = len(rows) - nc
+    for r in rows:
+        (c if r["urgency"] == "critical" else n).update(set(triage.normalize(r["text"]).split()))
+    sk = sorted(((c[w] / max(1, nc) - n[w] / max(1, nn), w) for w in set(c) | set(n) if c[w] + n[w] >= min_count),
+                reverse=True)
+    print("\nممیزی shortcut (train): توکن‌هایی که بیشتر از همه فقط در یک کلاس‌اند")
+    for d, w in sk[:top]:
+        print(f"   {w:<12} critical={c[w]/max(1,nc):>4.0%}  non_critical={n[w]/max(1,nn):>4.0%}")
+    for lab in ("critical", "non_critical"):
+        sub = [r for r in rows if r["urgency"] == lab] or [{"text": ""}]
+        w = sum(len(triage.normalize(r["text"]).split()) for r in sub) / len(sub)
+        q = sum(("؟" in r["text"] or "?" in r["text"]) for r in sub) / len(sub)
+        print(f"   {lab:<13} میانگین کلمه={w:4.1f}   دارای «؟»={q:.0%}")
+    big = [w for d, w in sk[:top] if d > 0.15]
+    if big:
+        print(f"   ⚠ اختلاف >۱۵٪ برای: {big} — احتمالاً shortcut؛ قالب/داده را متوازن کنید.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--val-frac", type=float, default=0.15, help="سهم *گروه‌ها* برای val")
     ap.add_argument("--test-frac", type=float, default=0.15, help="سهم *گروه‌ها* برای test")
-    ap.add_argument("--templates-per-kw", type=int, default=10)
+    ap.add_argument("--templates-per-kw", type=int, default=6)
     ap.add_argument("--min-routine", type=int, default=300)
+    ap.add_argument("--frame-prob", type=float, default=0.5,
+                    help="احتمال پیچیدن جملهٔ غیراورژانسی در قالب خنثی (ضد shortcut)")
+    ap.add_argument("--keep-followup", action="store_true",
+                    help="بخش بعد از «؛» (سؤال پیگیری سیستم) را نگه دار. پیش‌فرض: حذف")
     ap.add_argument("--min-groups-eval", type=int, default=8)
     ap.add_argument("--max-imbalance", type=float, default=1.5,
                     help="حداکثر نسبت کلاس اکثریت به اقلیت در train")
@@ -200,7 +272,7 @@ def main():
     rng = random.Random(a.seed)
 
     template_rows = gen_template_rows(rng, a.templates_per_kw)
-    routine_rows = load_routine(Path(a.parsbert_data))
+    routine_rows = load_routine(Path(a.parsbert_data), a.keep_followup)
     llm_crit = load_llm(Path(a.llm_critical), "critical")
     llm_non = load_llm(Path(a.llm_noncritical), "non_critical")
 
@@ -212,7 +284,7 @@ def main():
             import subprocess
             print("CSV روزمره پیدا نشد؛ در حال اجرای ParsBert/prepare_data.py ...")
             subprocess.run([sys.executable, str(script)], cwd=str(script.parent), check=False)
-            routine_rows = load_routine(Path(a.parsbert_data))
+            routine_rows = load_routine(Path(a.parsbert_data), a.keep_followup)
     if len(routine_rows) < a.min_routine:
         raise SystemExit(
             f"فقط {len(routine_rows)} نمونه روزمره پیدا شد (حداقل {a.min_routine}).\n"
@@ -230,6 +302,8 @@ def main():
             quarantine.append({**r, "why": "برچسب non_critical ولی قانون اورژانس می‌داند؛ پزشک بازبینی کند"})
         else:
             kept.append(r)
+
+    kept = wrap_neutral(kept, rng, a.frame_prob)
 
     # --- dedupe: متن یکسان با دو برچسب متفاوت → قرنطینه -------------------
     by_text = defaultdict(set)
@@ -249,8 +323,12 @@ def main():
 
     # --- split گروهی --------------------------------------------------------
     splits = {"train": [], "val": [], "test": []}
+    llm_assign = llm_assignment(rows, a.seed, a.val_frac, a.test_frac)
     for r in rows:
-        splits[split_of(r["group"], a.seed, a.val_frac, a.test_frac)].append(r)
+        sp_name = llm_assign.get(r["group"]) or split_of(r["group"], a.seed, a.val_frac, a.test_frac)
+        splits[sp_name].append(r)
+    if llm_assign:
+        print("تخصیص مفاهیم LLM:", {g.split(":", 2)[2] + "/" + g.split(":")[1][:4]: v for g, v in sorted(llm_assign.items())})
 
     # متن مشترک بین train و val/test (مثلاً دو گروه با متن یکسان) → از train حذف
     held_texts = {triage.normalize(r["text"]) for s in ("val", "test") for r in splits[s]}
@@ -313,6 +391,7 @@ def main():
     print("\nمنبع × برچسب (train+val+test):")
     for (src, u), n in sorted(srcs.items()):
         print(f"  {src:<14}{u:<14}{n}")
+    shortcut_audit(splits["train"])
     print(f"\nقبل از متوازن‌سازی train: critical={raw_counts[0]}  non_critical={raw_counts[1]}")
     print(f"قرنطینه برای بازبینی پزشک: {len(quarantine)}  → {q_path}")
     if not (llm_crit or llm_non):
