@@ -206,6 +206,14 @@ def main():
 
     # --- چک ۱: داده روزمره واقعی حتماً باشد --------------------------------
     if len(routine_rows) < a.min_routine:
+        # تلاش خودکار: ساخت CSVها با ParsBert/prepare_data.py (با cwd درست)
+        script = ROOT / "ParsBert" / "prepare_data.py"
+        if script.exists():
+            import subprocess
+            print("CSV روزمره پیدا نشد؛ در حال اجرای ParsBert/prepare_data.py ...")
+            subprocess.run([sys.executable, str(script)], cwd=str(script.parent), check=False)
+            routine_rows = load_routine(Path(a.parsbert_data))
+    if len(routine_rows) < a.min_routine:
         raise SystemExit(
             f"فقط {len(routine_rows)} نمونه روزمره پیدا شد (حداقل {a.min_routine}).\n"
             f"اول اجرا کنید:  python ParsBert/prepare_data.py\n"
