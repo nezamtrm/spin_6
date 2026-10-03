@@ -35,8 +35,11 @@ from pathlib import Path
 from specialties import BY_KEY, LABEL2ID, SPECIALTIES
 from text_utils import CSV_WRITE_ENCODING, normalize, setup_console
 
-RAW_JSON = Path("data/raw/parsbert_finetune_samples.json")
-RAW_DIR = Path("data/raw")
+# مسیرها نسبت به محل خود این فایل‌اند، نه نسبت به پوشه‌ای که از آن اجرا می‌کنید
+# (قبلاً از ریشهٔ پروژه اجرا می‌شد و FileNotFoundError می‌داد).
+_HERE = Path(__file__).resolve().parent
+RAW_JSON = _HERE / "data" / "raw" / "parsbert_finetune_samples.json"
+RAW_DIR = _HERE / "data" / "raw"
 
 # نام‌های فارسی تخصص‌هایی که در فایل JSON داده واقعی دارند (باید دقیقا با
 # specialties.py یکی باشند)
@@ -169,7 +172,7 @@ def main():
     setup_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--raw-json", default=str(RAW_JSON))
-    ap.add_argument("--out", default="data")
+    ap.add_argument("--out", default=str(_HERE / "data"))
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--no-followup-augment", action="store_true",
                      help="فقط chief_complaint خام استفاده شود (بدون ترکیب با سوال پیگیری)")
