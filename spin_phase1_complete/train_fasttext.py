@@ -82,6 +82,8 @@ def main():
     ap.add_argument("--word-ngrams", type=int, default=1)
     ap.add_argument("--minn", type=int, default=2)
     ap.add_argument("--maxn", type=int, default=4)
+    ap.add_argument("--bucket", type=int, default=100000,
+                    help="تعداد bucket هش n-gram. پیش‌فرض fastText=2M که با dim=50 مدل ۴۰۰MB می‌سازد")
     ap.add_argument("--grid", action="store_true")
     ap.add_argument("--max-fpr", type=float, default=0.15)
     ap.add_argument("--min-train", type=int, default=500,
@@ -106,7 +108,7 @@ def main():
         probs = [p_critical(m, r["text"]) for r in val_rows]
         return m, probs, operating_point(golds, probs, a.max_fpr)
 
-    base = dict(lr=a.lr, epoch=a.epoch, dim=a.dim, wordNgrams=a.word_ngrams, minn=a.minn, maxn=a.maxn)
+    base = dict(lr=a.lr, epoch=a.epoch, dim=a.dim, wordNgrams=a.word_ngrams, minn=a.minn, maxn=a.maxn, bucket=a.bucket)
     cfgs = [base]
     if a.grid:
         cfgs = [dict(base, lr=lr, epoch=ep, wordNgrams=wn, dim=dm)
