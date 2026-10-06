@@ -11,7 +11,8 @@ evaluate_grouped.py — ارزیابی صادقانهٔ تریاژ + انتخا�
 اجرا:   python evaluate_grouped.py [--target-recall 0.98]
 قبلش:   python prepare_triage_data.py && python train_fasttext.py
 """
-import argparse, importlib.util, json, sys
+import argparse, importlib.util, json, re, sys
+from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -35,7 +36,7 @@ def p_critical(model, text):
 def prep(model, rows):
     out = []
     for r in rows:
-        out.append(dict(text=r["text"], gold=r["urgency"] == "critical",
+        out.append(dict(text=r["text"], gold=r["urgency"] == "critical", group=r.get("group", "?"), source=r.get("source", "?"),
                         rule=bool(triage.rule_based_check(r["text"])), p=p_critical(model, r["text"])))
     return out
 
@@ -53,6 +54,8 @@ def score(items, thr, mode):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target-recall", type=float, default=0.98)
+    ap.add_argument("--save-threshold", action="store_true",
+                    help="آستانهٔ انتخابی را کنار مدل (triage_model.bin.threshold.json) ذخیره کن")
     a = ap.parse_args()
 
     model = triage._get_model()
@@ -82,19 +85,22 @@ def main():
     print(f"\nمعیار انتخاب آستانه: recall fastText روی {pool_name}")
     print("--- جاروب آستانه روی VAL ---")
     print(f"{'thr':>5} | {'pool recall':>11} | {'pipe recall':>11} {'pipe FPR':>9} {'pipe prec':>10}")
-    chosen = None
+    table = []
     for t in THRESHOLDS:
         pr = sum(x["p"] >= t for x in pool) / max(1, len(pool))
         p = score(val, t, "pipe")
+        table.append((t, pr, p))
         print(f"{t:>5.2f} | {pr:>11.1%} | {p['recall']:>11.1%} {p['fpr']:>9.1%} {p['precision']:>10.1%}")
-        if pr >= a.target_recall:
-            chosen = t
-    if chosen is None:
-        chosen = THRESHOLDS[0]
-        print(f"\n⚠ هیچ آستانه‌ای به recall≥{a.target_recall:.0%} نرسید؛ کمترین آستانه ({chosen}) انتخاب شد "
-              f"— یعنی خود مدل/داده کافی نیست.")
-    else:
+    ok = [t for t, pr, _ in table if pr >= a.target_recall]
+    if ok:
+        chosen = max(ok)
         print(f"\n✔ آستانهٔ انتخابی (بزرگ‌ترین با recall≥{a.target_recall:.0%}): {chosen}")
+    else:
+        best = max(pr for _, pr, _ in table)
+        chosen = max(t for t, pr, _ in table if pr >= best - 0.005)
+        print(f"\n⚠ هیچ آستانه‌ای به recall≥{a.target_recall:.0%} نرسید (بیشینهٔ ممکن {best:.1%}). "
+              f"بزرگ‌ترین آستانه‌ای که از بیشینه بیش از ۰٫۵ نقطه کم نمی‌کند انتخاب شد: {chosen} "
+              f"(نه کمترین آستانه؛ آن فقط FP را بی‌دلیل بالا می‌برد).")
 
     print(f"\n=== TEST گروهی @thr={chosen} (فقط یک‌بار نگاه کنید؛ دوباره برای بهتر شدن تنظیم نکنید) ===")
     for mode, name in (("ft", "fastText تنها"), ("pipe", "پایپلاین (قانون OR fastText)")):
@@ -109,6 +115,24 @@ def main():
     else:
         print("\n⚠ در test هیچ نمونهٔ critical بدون کلیدواژه نیست → تعمیم سنجیده نمی‌شود (داده LLM اضافه کنید).")
 
+    def base(g):
+        return re.sub(r"#\d+$", "", g)
+    groups = defaultdict(list)
+    for x in test:
+        groups[(x["gold"], base(x["group"]))].append(x)
+    print(f"\nتفکیک test بر اساس مفهوم @thr={chosen} (پایپلاین؛ ستون ft فقط fastText):")
+    print(f"  {'مفهوم':<46}{'n':>4}  {'pipe':>6}  {'ft':>6}   (critical: recall، non_critical: نرخ FP)")
+    for (gold, g), xs in sorted(groups.items(), key=lambda kv: (not kv[0][0], kv[0][1])):
+        pipe = sum(bool(x["rule"] or x["p"] >= chosen) for x in xs) / len(xs)
+        ft = sum(x["p"] >= chosen for x in xs) / len(xs)
+        tag = "C" if gold else "N"
+        print(f"  {tag} {g[:44]:<44}{len(xs):>4}  {pipe:>6.0%}  {ft:>6.0%}")
+    print("\nFP بر اساس منبع:")
+    for src in sorted({x["source"] for x in test}):
+        xs = [x for x in test if x["source"] == src and not x["gold"]]
+        if xs:
+            print(f"   {src:<14} n={len(xs):>4}  FPR پایپلاین={sum(bool(x['rule'] or x['p']>=chosen) for x in xs)/len(xs):.0%}  FPR fastText={sum(x['p']>=chosen for x in xs)/len(xs):.0%}")
+
     miss = [x for x in test if x["gold"] and not (x["rule"] or x["p"] >= chosen)]
     print(f"\nFN پایپلاین ({len(miss)}) — این‌ها را تک‌تک بخوانید:")
     for x in miss[:25]:
@@ -117,7 +141,15 @@ def main():
     print(f"\nنمونه‌های FP پایپلاین ({len(fps)}) — اولین ۱۰ تا:")
     for x in fps[:10]:
         print(f"  rule={x['rule']!s:<5} p={x['p']:.2f} | {x['text']}")
-    print(f"\nبرای production: export TRIAGE_FT_THRESHOLD={chosen}")
+    print(f"\nبرای production: export TRIAGE_FT_THRESHOLD={chosen}   (یا --save-threshold تا کنار مدل ذخیره شود)")
+    if a.save_threshold:
+        fs, ps = score(test, chosen, "ft"), score(test, chosen, "pipe")
+        info = {"threshold": chosen, "target_recall": a.target_recall, "chosen_on": "val(grouped)",
+                "test_pipeline_recall": round(ps["recall"], 4), "test_pipeline_fpr": round(ps["fpr"], 4),
+                "test_ft_recall": round(fs["recall"], 4), "n_test": len(test),
+                "model_mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mp.stat().st_mtime))}
+        Path(str(mp) + ".threshold.json").write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
+        print("ذخیره شد:", str(mp) + ".threshold.json")
 
 
 if __name__ == "__main__":
