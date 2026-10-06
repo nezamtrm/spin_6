@@ -146,6 +146,10 @@ def load_routine(parsbert_data: Path, keep_followup: bool = False):
     return rows
 
 
+PATTERN_CONCEPTS = {"negated_critical_symptom", "past_history_no_current_symptom", "chronic_stable_complaint",
+                    "negation_with_other_red_flag", "understated_critical"}
+
+
 def load_llm(path: Path, urgency: str):
     rows = []
     if not path.exists():
@@ -158,7 +162,12 @@ def load_llm(path: Path, urgency: str):
             t, c = (r.get("text") or "").strip(), (r.get("concept") or "").strip()
             if not t or not c:
                 raise SystemExit(f"{path}:{ln}: هر خط باید text و concept داشته باشد.")
-            rows.append(dict(text=t, urgency=urgency, group=f"llm:{urgency}:{c}", source="llm"))
+            g = f"llm:{urgency}:{c}"
+            if c in PATTERN_CONCEPTS:
+                # مفهوم «الگو» ده‌ها تا ۱۳۰ جملهٔ متنوع دارد؛ اگر کل آن یک گروه باشد، با hash یکجا به
+                # یک split می‌رود. پس به ۶ زیرگروه تقسیم می‌شود تا در هر سه split حاضر باشد.
+                g += "#" + str(int(hashlib.sha1(t.encode("utf-8")).hexdigest()[:6], 16) % 6)
+            rows.append(dict(text=t, urgency=urgency, group=g, source="llm"))
     return rows
 
 
