@@ -230,7 +230,20 @@ _MODEL_PATH = os.environ.get(
 )
 # آستانهٔ احتمال critical. 0.5 = argmax. برای ایمنی پایین‌تر است؛ مقدار نهایی را با
 # evaluate روی val گروهی (کلیدواژه‌های دیده‌نشده) تعیین کنید، نه حدسی.
-FT_THRESHOLD = float(os.environ.get("TRIAGE_FT_THRESHOLD", "0.30"))
+def _load_threshold() -> float:
+    """اولویت: متغیر TRIAGE_FT_THRESHOLD ← فایل <model>.threshold.json (کنار مدل) ← 0.30."""
+    env = os.environ.get("TRIAGE_FT_THRESHOLD")
+    if env:
+        return float(env)
+    try:
+        import json
+        with open(_MODEL_PATH + ".threshold.json", encoding="utf-8") as f:
+            return float(json.load(f)["threshold"])
+    except Exception:
+        return 0.30
+
+
+FT_THRESHOLD = _load_threshold()
 _model = None  # loaded on first use, not at import time
 
 
