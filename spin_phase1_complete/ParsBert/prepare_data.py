@@ -1,29 +1,29 @@
 # -*- coding: utf-8 -*-
-"""ساخت data/train.csv, data/validation.csv, data/test.csv برای ۶ تخصص.
+# """ساخت data/train.csv, data/validation.csv, data/test.csv برای ۶ تخصص.
 
-این اسکریپت جایگزین جریان کاری قبلی build_dataset.py شده و دو منبع را
-با هم ترکیب می‌کند:
+# این اسکریپت جایگزین جریان کاری قبلی build_dataset.py شده و دو منبع را
+# با هم ترکیب می‌کند:
 
-  ۱) داده واقعی برچسب‌خورده در data/raw/parsbert_finetune_samples.json
-     (فرمت: لیستی از آبجکت‌های {id, specialty, chief_complaint,
-     follow_up_question, answer}) — برای تخصص‌های:
-     دندانپزشکی، زنان و زایمان، ارتوپدی، جراحی عمومی، گفتار درمانی
+#   ۱) داده واقعی برچسب‌خورده در data/raw/parsbert_finetune_samples.json
+#      (فرمت: لیستی از آبجکت‌های {id, specialty, chief_complaint,
+#      follow_up_question, answer}) — برای تخصص‌های:
+#      دندانپزشکی، زنان و زایمان، ارتوپدی، جراحی عمومی، گفتار درمانی
 
-  ۲) داده مصنوعی bootstrap برای «پزشک عمومی» که داده واقعی ندارد؛
-     از ترکیب الگوهای شکایت بیمار (TEMPLATES) × واژگان کلیدی GP در
-     specialties.py ساخته می‌شود (دقیقاً همان تکنیک build_dataset.py قدیم).
+#   ۲) داده مصنوعی bootstrap برای «پزشک عمومی» که داده واقعی ندارد؛
+#      از ترکیب الگوهای شکایت بیمار (TEMPLATES) × واژگان کلیدی GP در
+#      specialties.py ساخته می‌شود (دقیقاً همان تکنیک build_dataset.py قدیم).
 
-اگر بعداً برای پزشک عمومی هم داده واقعی جمع کردید، همان را به فرمت
-chief_complaint/specialty در فایل JSON اضافه کنید یا مستقیماً به
-data/train.csv (ستون‌های text,label) اضافه/جایگزین کنید و دیگر نیازی به
-تولید مصنوعی GP نیست (با --no-synthetic-gp غیرفعالش کنید).
+# اگر بعداً برای پزشک عمومی هم داده واقعی جمع کردید، همان را به فرمت
+# chief_complaint/specialty در فایل JSON اضافه کنید یا مستقیماً به
+# data/train.csv (ستون‌های text,label) اضافه/جایگزین کنید و دیگر نیازی به
+# تولید مصنوعی GP نیست (با --no-synthetic-gp غیرفعالش کنید).
 
-اجرا:
-    python prepare_data.py
-    python prepare_data.py --no-followup-augment     # فقط متن اصلی شکایت، بدون تقویت با سوال پیگیری
-    python prepare_data.py --no-synthetic-gp          # اگر برای GP هم داده واقعی دارید
-    python prepare_data.py --gp-multiplier 1.5        # حجم دیتای مصنوعی GP را کم/زیاد کنید
-"""
+# اجرا:
+#     python prepare_data.py
+#     python prepare_data.py --no-followup-augment     # فقط متن اصلی شکایت، بدون تقویت با سوال پیگیری
+#     python prepare_data.py --no-synthetic-gp          # اگر برای GP هم داده واقعی دارید
+#     python prepare_data.py --gp-multiplier 1.5        # حجم دیتای مصنوعی GP را کم/زیاد کنید
+# """
 
 import argparse
 import csv
